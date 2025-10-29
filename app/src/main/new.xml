@@ -1,0 +1,6 @@
+<!-- *** NEW BATTERY BUTTON *** -->
+<Button android:id="@+id/btn_get_battery" android:layout_width="wrap_content" android:layout_height="wrap_content"
+    android:layout_marginStart="24dp" android:layout_marginTop="24dp" android:onClick="onClickGetBattery"
+    android:text="Get Battery" app:layout_constraintStart_toStartOf="parent"
+    app:layout_constraintTop_toTopOf="parent" />
+

@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/main"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    tools:context=".MainActivity">
+
+    <!-- The "Connect" button in the top-right corner -->
+    <Button
+        android:id="@+id/btn_connect"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:layout_marginEnd="24dp"
+        android:onClick="onClickConnect"
+        android:text="Connect"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!--
+    !!! THIS IS THE MISSING PART !!!
+    Add this TextView to your layout file.
+    -->
+    <TextView
+        android:id="@+id/status_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="32dp"
+        android:text="Status: Not Connected"
+        android:textSize="16sp"
+        android:textColor="@android:color/black"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/btn_connect" />
+
+    <!-- The outer circle of the joystick (the base) -->
+    <View
+        android:id="@+id/joystick_base"
+        android:layout_width="200dp"
+        android:layout_height="200dp"
+        android:background="@drawable/joystick_base_background"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- The inner circle of the joystick (the handle) -->
+    <View
+        android:id="@+id/joystick_handle"
+        android:layout_width="80dp"
+        android:layout_height="80dp"
+        android:background="@drawable/joystick_handle_background"
+        app:layout_constraintBottom_toBottomOf="@id/joystick_base"
+        app:layout_constraintEnd_toEndOf="@id/joystick_base"
+        app:layout_constraintStart_toStartOf="@id/joystick_base"
+        app:layout_constraintTop_toTopOf="@id/joystick_base" />
+
+    <Button
+        android:id="@+id/btn_get_battery"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="24dp"
+        android:layout_marginTop="24dp"
+        android:onClick="onClickGetBattery"
+        android:text="@string/get_battery"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+    <com.google.android.material.slider.Slider
+        android:id="@+id/speed_slider"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="32dp"
+        android:layout_marginEnd="32dp"
+        android:stepSize="500.0"
+        android:value="1000.0"
+        android:valueFrom="500.0"
+        android:valueTo="8000.0"
+        app:layout_constraintBottom_toTopOf="@id/joystick_base"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/status_text" />
+
+
+</androidx.constraintlayout.widget.ConstraintLayout>
