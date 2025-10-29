@@ -16,15 +16,23 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.MyApplication">
 
+        <!-- This is now the LAUNCHER activity -->
         <activity
-            android:name=".MainActivity"
+            android:name=".WelcomeActivity"
             android:exported="true"
-            tools:targetApi="31">
+            tools:ignore="MissingClass">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+        </activity>
+
+        <!-- MainActivity is now a regular activity, not the launcher -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            tools:targetApi="31">
+            <!-- The intent filter was moved from here -->
         </activity>
 
         <activity android:name=".Bluetooth.BT_DeviceListActivity"
