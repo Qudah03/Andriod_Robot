@@ -7,7 +7,7 @@
     android:layout_height="match_parent"
     tools:context=".MainActivity">
 
-    <!-- The "Connect" button in the top-right corner -->
+    <!-- Top row of buttons and status -->
     <Button
         android:id="@+id/btn_connect"
         android:layout_width="wrap_content"
@@ -15,47 +15,9 @@
         android:layout_marginTop="24dp"
         android:layout_marginEnd="24dp"
         android:onClick="onClickConnect"
-        android:text="Connect"
+        android:text="@string/connect"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
-
-    <!--
-    !!! THIS IS THE MISSING PART !!!
-    Add this TextView to your layout file.
-    -->
-    <TextView
-        android:id="@+id/status_text"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="32dp"
-        android:text="Status: Not Connected"
-        android:textSize="16sp"
-        android:textColor="@android:color/black"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/btn_connect" />
-
-    <!-- The outer circle of the joystick (the base) -->
-    <View
-        android:id="@+id/joystick_base"
-        android:layout_width="200dp"
-        android:layout_height="200dp"
-        android:background="@drawable/joystick_base_background"
-        app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent" />
-
-    <!-- The inner circle of the joystick (the handle) -->
-    <View
-        android:id="@+id/joystick_handle"
-        android:layout_width="80dp"
-        android:layout_height="80dp"
-        android:background="@drawable/joystick_handle_background"
-        app:layout_constraintBottom_toBottomOf="@id/joystick_base"
-        app:layout_constraintEnd_toEndOf="@id/joystick_base"
-        app:layout_constraintStart_toStartOf="@id/joystick_base"
-        app:layout_constraintTop_toTopOf="@id/joystick_base" />
 
     <Button
         android:id="@+id/btn_get_battery"
@@ -67,20 +29,103 @@
         android:text="@string/get_battery"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- Speed Slider -->
+
+    <!-- Joystick Base (Solid) -->
+
+    <!-- Joystick Handle -->
+
+    <TextView
+        android:id="@+id/status_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="132dp"
+        android:text="@string/status_not_connected"
+        android:textColor="?attr/colorOnSurface"
+        android:textSize="16sp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintHorizontal_bias="0.498"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/btn_connect" />
+
     <com.google.android.material.slider.Slider
         android:id="@+id/speed_slider"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginStart="32dp"
         android:layout_marginEnd="32dp"
+        android:layout_marginBottom="72dp"
         android:stepSize="500.0"
         android:value="1000.0"
         android:valueFrom="500.0"
         android:valueTo="8000.0"
         app:layout_constraintBottom_toTopOf="@id/joystick_base"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/status_text" />
+        app:layout_constraintHorizontal_bias="0.0"
+        app:layout_constraintStart_toStartOf="parent" />
 
+    <View
+        android:id="@+id/joystick_base"
+        android:layout_width="200dp"
+        android:layout_height="200dp"
+        android:background="@drawable/joystick_base_background"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintHorizontal_bias="0.497"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintVertical_bias="0.431" />
+
+    <View
+        android:id="@+id/joystick_handle"
+        android:layout_width="80dp"
+        android:layout_height="80dp"
+        android:background="@drawable/joystick_handle_background"
+        app:layout_constraintBottom_toBottomOf="@id/joystick_base"
+        app:layout_constraintEnd_toEndOf="@id/joystick_base"
+        app:layout_constraintStart_toStartOf="@id/joystick_base"
+        app:layout_constraintTop_toTopOf="@id/joystick_base" />
+
+    <!-- 1. RECTANGULAR CAMERA PREVIEW, POSITIONED UNDER THE JOYSTICK -->
+    <androidx.cardview.widget.CardView
+        android:id="@+id/camera_card"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_marginStart="32dp"
+        android:layout_marginTop="16dp"
+        android:layout_marginEnd="32dp"
+        android:layout_marginBottom="16dp"
+        android:visibility="invisible"
+        app:cardCornerRadius="16dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/joystick_base"
+        tools:visibility="visible">
+
+        <androidx.camera.view.PreviewView
+            android:id="@+id/previewView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+    </androidx.cardview.widget.CardView>
+
+    <!-- 2. CAMERA TOGGLE BUTTON -->
+    <ImageButton
+        android:id="@+id/btn_toggle_camera"
+        android:layout_width="60dp"
+        android:layout_height="60dp"
+        android:layout_marginEnd="32dp"
+        android:layout_marginBottom="300dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="@string/toggle_camera"
+        android:onClick="onClickToggleCamera"
+        android:padding="8dp"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_camera"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:tint="?attr/colorOnSurface" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>
