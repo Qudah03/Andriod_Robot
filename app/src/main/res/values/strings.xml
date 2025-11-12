@@ -4,4 +4,5 @@
     <string name="connect">Connect</string>
     <string name="status_not_connected">Status: Not Connected</string>
     <string name="toggle_camera">Toggle Camera</string>
+    <string name="todo">TODO</string>
 </resources>

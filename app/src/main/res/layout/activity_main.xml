@@ -109,6 +109,26 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
+        <!-- This will show the processed image on top -->
+        <ImageView
+            android:id="@+id/imageView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="@string/todo" />
+
+        <!-- *** toggling line-following mode button *** -->
+        <Button
+            android:id="@+id/btn_follow_line"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_marginBottom="8dp"
+            android:onClick="onClickToggleLineFollowing"
+            android:text="Start Line Follow"
+            android:visibility="gone"
+            tools:visibility="visible"/>
+
+
     </androidx.cardview.widget.CardView>
 
     <!-- 2. CAMERA TOGGLE BUTTON -->
@@ -127,5 +147,7 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:tint="?attr/colorOnSurface" />
+
+
 
 </androidx.constraintlayout.widget.ConstraintLayout>
