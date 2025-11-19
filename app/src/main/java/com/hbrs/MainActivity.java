@@ -98,24 +98,16 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // --- Image Analyzer with Optimizations ---
-    private class MyAnalyzer implements ImageAnalysis.Analyzer {
-        private Paint p = new Paint();
-        private Bitmap overlayBitmap;
-        private Canvas overlayCanvas;
+    // --- Image Analyzer with ROBUST detection and CLEAN UI (No Drawing) ---
+/***    private class MyAnalyzer implements ImageAnalysis.Analyzer {
 
         @SuppressLint("UnsafeOptInUsageError")
         @Override
         public void analyze(@NonNull ImageProxy imageProxy) {
             try {
-                // --- Setup the overlay for drawing ---
-                if (overlayBitmap == null || overlayBitmap.getWidth() != imageProxy.getWidth() || overlayBitmap.getHeight() != imageProxy.getHeight()) {
-                    overlayBitmap = Bitmap.createBitmap(imageProxy.getWidth(), imageProxy.getHeight(), Bitmap.Config.ARGB_8888);
-                    overlayCanvas = new Canvas(overlayBitmap);
-                }
-                overlayCanvas.drawColor(Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR);
+                // We don't need the overlay for drawing anymore, but the structure is kept for potential future use.
+                // The main logic is now just detection and control.
 
-                // --- Multi-line Scan ---
-                // We will scan at three different vertical positions in the image.
                 int height = imageProxy.getHeight();
                 int width = imageProxy.getWidth();
                 int[] scanlinesY = {
@@ -127,14 +119,8 @@ public class MainActivity extends AppCompatActivity {
                 int totalPoints = 0;
                 int averageCenterX = 0;
 
-                // --- Visualization: Draw the scanlines ---
-                p.setColor(Color.YELLOW);
-                p.setStyle(Paint.Style.STROKE);
-                p.setStrokeWidth(2);
+                // --- Scan for the line at multiple points ---
                 for (int y : scanlinesY) {
-                    overlayCanvas.drawLine(0, y, width - 1, y, p);
-
-                    // --- Adaptive Thresholding and Line Finding for each scanline ---
                     int trackCenter = findTrackCenterAdaptive(imageProxy, y);
                     if (trackCenter != -1) {
                         averageCenterX += trackCenter;
@@ -142,42 +128,31 @@ public class MainActivity extends AppCompatActivity {
                     }
                 }
 
-                // --- Calculate Target Point ---
                 int targetX = -1;
                 if (totalPoints > 0) {
                     // The target X is the average of all detected center points.
                     targetX = averageCenterX / totalPoints;
-
-                    // The target Y is the lowest scanline, as that's closest to the robot.
-                    int targetY = scanlinesY[scanlinesY.length - 1];
-
-                    // --- Visualization: Draw the red target dot ---
-                    p.setColor(Color.RED);
-                    p.setStyle(Paint.Style.FILL);
-                    overlayCanvas.drawCircle(targetX, targetY, 20, p);
                 }
-
 
                 // --- Robot Control ---
                 if (isConnected && isLineFollowingActive) {
                     if (targetX != -1) {
-                        // Calculate error based on the final averaged target point
                         float error = (width / 2.0f) - targetX;
                         int steeringCorrection = (int) (error * P_GAIN);
-
                         int leftSpeed = LINE_FOLLOW_SPEED + steeringCorrection;
                         int rightSpeed = LINE_FOLLOW_SPEED - steeringCorrection;
 
                         orb.setMotor(ORB.M1, ORB.SPEED_MODE, -leftSpeed, 0);
                         orb.setMotor(ORB.M4, ORB.SPEED_MODE, +rightSpeed, 0);
                     } else {
-                        // Line is completely lost
+                        // Line is completely lost, stop the robot for safety.
                         stopRobot();
                     }
                 }
 
-                // Update the overlay ImageView on the UI thread
-                runOnUiThread(() -> imageView.setImageBitmap(overlayBitmap));
+                // --- VISUALIZATION IS REMOVED ---
+                // No drawing calls to overlayCanvas.
+                // No update to the imageView, so it remains transparent.
 
             } finally {
                 // CRITICAL: Always close the imageProxy
@@ -185,13 +160,13 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        /**
-         * Finds the center of a dark track using an adaptive threshold.
-         * This is much more robust to lighting changes than a fixed threshold.
-         */
+
+         // Finds the center of a dark track using an adaptive threshold.
+         // This is much more robust to lighting changes than a fixed threshold.
+
         @SuppressLint("UnsafeOptInUsageError")
         private int findTrackCenterAdaptive(ImageProxy image, int y) {
-            Bitmap bm = image.toBitmap(); // Using toBitmap is simpler for pixel access here.
+            Bitmap bm = image.toBitmap();
             int width = bm.getWidth();
             int startOfTrack = -1;
             int endOfTrack = -1;
@@ -199,7 +174,7 @@ public class MainActivity extends AppCompatActivity {
             int minBrightness = 255;
             int maxBrightness = 0;
 
-            // 1. First Pass: Find the min and max brightness on this specific scanline.
+            // 1. First Pass: Find min/max brightness
             for (int x = 0; x < width; x++) {
                 int pixel = bm.getPixel(x, y);
                 int brightness = (Color.red(pixel) + Color.green(pixel) + Color.blue(pixel)) / 3;
@@ -207,20 +182,15 @@ public class MainActivity extends AppCompatActivity {
                 if (brightness > maxBrightness) maxBrightness = brightness;
             }
 
-            // 2. Calculate the adaptive threshold.
-            // A good threshold is often halfway between the darkest and brightest point.
-            // int threshold = minBrightness + (maxBrightness - minBrightness) / 2;
+            // 2. Calculate adaptive threshold
+            int threshold = minBrightness + (maxBrightness - minBrightness) / 2;
 
-            // We can add a bias if we know the line is much darker than the background is light.
-            // For a black line on white floor, a threshold closer to the max brightness is better.
-            int threshold = (int)(maxBrightness * 0.7); // Alternative thresholding
-
-            // 3. Second Pass: Use the calculated threshold to find the track.
+            // 3. Second Pass: Find the track using the threshold
             for (int x = 0; x < width; x++) {
                 int pixel = bm.getPixel(x, y);
                 int brightness = (Color.red(pixel) + Color.green(pixel) + Color.blue(pixel)) / 3;
 
-                if (brightness < threshold) { // Use the dynamic threshold here
+                if (brightness < threshold) {
                     if (startOfTrack == -1) {
                         startOfTrack = x;
                     }
@@ -228,15 +198,126 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
 
-            // Check if a valid track was found
-            if (startOfTrack != -1 && (endOfTrack - startOfTrack) > 10) { // Must be at least 10 pixels wide
-                return startOfTrack + ((endOfTrack - startOfTrack) / 2); // Return the center
+            if (startOfTrack != -1 && (endOfTrack - startOfTrack) > 10) {
+                return startOfTrack + ((endOfTrack - startOfTrack) / 2);
             }
 
-            return -1; // Track not found on this line
+            return -1; // Track not found
         }
     }
+***/
 
+// --- Image Analyzer with ADVANCED TARGETING VISUALIZATION ---
+private class MyAnalyzer implements ImageAnalysis.Analyzer {@SuppressLint("UnsafeOptInUsageError")
+@Override
+public void analyze(@NonNull ImageProxy imageProxy) {
+    try {
+        // The main logic is now detection, targeting, and control.
+        // Visualization is removed for a clean UI.
+
+        int height = imageProxy.getHeight();
+        int width = imageProxy.getWidth();
+
+        // 1. Scan the image at two points to determine the line's angle
+        int topY = (int) (height * 0.4);
+        int bottomY = (int) (height * 0.8);
+
+        int topX = findTrackCenterAdaptive(imageProxy, topY);
+        int bottomX = findTrackCenterAdaptive(imageProxy, bottomY);
+
+        // 2. Determine the robot's target point and control logic
+        if (isConnected && isLineFollowingActive) {
+            if (topX != -1 && bottomX != -1) {
+                // --- We have two points, so we can calculate the line's angle and position ---
+
+                // Calculate the horizontal offset of the line from the center at the bottom of the view
+                float currentOffset = bottomX - (width / 2.0f);
+
+                // Calculate the angle of the line. A positive angle means the line is pointing to the right.
+                // A small angle correction factor might be needed depending on camera lens distortion.
+                float angle = (float) Math.toDegrees(Math.atan2(topX - bottomX, topY - bottomY));
+
+                // --- ADVANCED CONTROL ---
+                // The error is a combination of the current offset and the angle of the line.
+                // This acts like a "PD" (Proportional-Derivative) controller.
+                // The 'offset' is the P term (where are we now?)
+                // The 'angle' is the D term (where are we going?)
+                float error = currentOffset * 0.5f + angle * 1.5f;
+
+                int steeringCorrection = (int) (error * P_GAIN);
+                int leftSpeed = LINE_FOLLOW_SPEED + steeringCorrection;
+                int rightSpeed = LINE_FOLLOW_SPEED - steeringCorrection;
+
+                orb.setMotor(ORB.M1, ORB.SPEED_MODE, -leftSpeed, 0);
+                orb.setMotor(ORB.M4, ORB.SPEED_MODE, +rightSpeed, 0);
+
+            } else if (bottomX != -1) {
+                // --- We only see the bottom of the line, use simple control ---
+                float error = (width / 2.0f) - bottomX;
+                int steeringCorrection = (int) (error * P_GAIN);
+                int leftSpeed = LINE_FOLLOW_SPEED + steeringCorrection;
+                int rightSpeed = LINE_FOLLOW_SPEED - steeringCorrection;
+                orb.setMotor(ORB.M1, ORB.SPEED_MODE, -leftSpeed, 0);
+                orb.setMotor(ORB.M4, ORB.SPEED_MODE, +rightSpeed, 0);
+            } else {
+                // Line is completely lost, stop the robot for safety.
+                stopRobot();
+            }
+        }
+
+        // --- VISUALIZATION IS REMOVED as per the previous request ---
+
+    } finally {
+        // CRITICAL: Always close the imageProxy
+        imageProxy.close();
+    }
+}
+
+    /**
+     * Finds the center of a dark track using an adaptive threshold.
+     * This is much more robust to lighting changes than a fixed threshold.
+     */
+    @SuppressLint("UnsafeOptInUsageError")
+    private int findTrackCenterAdaptive(ImageProxy image, int y) {
+        Bitmap bm = image.toBitmap();
+        int width = bm.getWidth();
+        int startOfTrack = -1;
+        int endOfTrack = -1;
+
+        int minBrightness = 255;
+        int maxBrightness = 0;
+
+        // 1. First Pass: Find min/max brightness
+        for (int x = 0; x < width; x++) {
+            int pixel = bm.getPixel(x, y);
+            int brightness = (Color.red(pixel) + Color.green(pixel) + Color.blue(pixel)) / 3;
+            if (brightness < minBrightness) minBrightness = brightness;
+            if (brightness > maxBrightness) maxBrightness = brightness;
+        }
+
+        // 2. Calculate adaptive threshold
+        int threshold = minBrightness + (maxBrightness - minBrightness) / 2;
+
+        // 3. Second Pass: Find the track using the threshold
+        for (int x = 0; x < width; x++) {
+            int pixel = bm.getPixel(x, y);
+            int brightness = (Color.red(pixel) + Color.green(pixel) + Color.blue(pixel)) / 3;
+
+            if (brightness < threshold) {
+                if (startOfTrack == -1) {
+                    startOfTrack = x;
+                }
+                endOfTrack = x;
+            }
+        }
+
+        if (startOfTrack != -1 && (endOfTrack - startOfTrack) > 10) {
+            return startOfTrack + ((endOfTrack - startOfTrack) / 2);
+        }
+
+        return -1; // Track not found
+    }
+}
     // --- CAMERA AND LINE FOLLOWING LOGIC ---
 
     public void onClickToggleCamera(View v) {
