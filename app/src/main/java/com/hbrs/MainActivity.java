@@ -6,9 +6,6 @@ import android.bluetooth.BluetoothDevice;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
-import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.Paint;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.MotionEvent;
@@ -32,13 +29,13 @@ import androidx.camera.view.PreviewView;
 import androidx.cardview.widget.CardView;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
-import androidx.lifecycle.LifecycleOwner;
 
 import com.google.android.material.slider.Slider;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.hbrs.Bluetooth.BT_DeviceListActivity;
 import com.hbrs.ORB.ORB;
 
+import java.nio.ByteBuffer;
 import java.util.concurrent.ExecutionException;
 
 public class MainActivity extends AppCompatActivity {
@@ -55,7 +52,7 @@ public class MainActivity extends AppCompatActivity {
     private Slider speedSlider;
     private CardView cameraCard;
     private PreviewView previewView;
-    private ImageView imageView; // Overlay for drawing
+    private ImageView imageView;
 
     // ORB object
     private ORB orb;
@@ -72,8 +69,9 @@ public class MainActivity extends AppCompatActivity {
 
     // Line Following control
     private boolean isLineFollowingActive = false;
-    private final int LINE_FOLLOW_SPEED = 1000;
-    private final float P_GAIN = 0.8f; // Proportional gain for steering (configurable)
+    // Adjusted base speed (lower is safer for testing)
+    private final int LINE_FOLLOW_SPEED = 600;
+    private final float P_GAIN = 1.5f; // Sensitivity
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -97,228 +95,128 @@ public class MainActivity extends AppCompatActivity {
         updateUI();
     }
 
-    // --- Image Analyzer with Optimizations ---
-    // --- Image Analyzer with ROBUST detection and CLEAN UI (No Drawing) ---
-/***    private class MyAnalyzer implements ImageAnalysis.Analyzer {
+    // --- IMPROVED FAST ANALYZER ---
+    // --- DEBUG ANALYZER WITH VISUALIZATION ---
 
-        @SuppressLint("UnsafeOptInUsageError")
+    private class MyAnalyzer implements ImageAnalysis.Analyzer {
+
+        private Bitmap debugBitmap;
+        private android.graphics.Canvas debugCanvas;
+        private android.graphics.Paint pointPaint;        private android.graphics.Paint linePaint;
+        private android.graphics.Paint boxPaint;
+
+        public MyAnalyzer() {
+            pointPaint = new android.graphics.Paint();
+            pointPaint.setColor(android.graphics.Color.GREEN);
+            pointPaint.setStrokeWidth(5);
+
+            linePaint = new android.graphics.Paint();
+            linePaint.setColor(android.graphics.Color.RED);
+            linePaint.setStrokeWidth(5);
+
+            boxPaint = new android.graphics.Paint();
+            boxPaint.setColor(android.graphics.Color.BLUE);
+            boxPaint.setStyle(android.graphics.Paint.Style.STROKE);
+            boxPaint.setStrokeWidth(3);
+        }
+
         @Override
-        public void analyze(@NonNull ImageProxy imageProxy) {
-            try {
-                // We don't need the overlay for drawing anymore, but the structure is kept for potential future use.
-                // The main logic is now just detection and control.
+        public void analyze(@NonNull ImageProxy image) {
+            if (!isLineFollowingActive) {
+                image.close();
+                return;
+            }
 
-                int height = imageProxy.getHeight();
-                int width = imageProxy.getWidth();
-                int[] scanlinesY = {
-                        (int) (height * 0.4), // Top scan
-                        (int) (height * 0.6), // Middle scan
-                        (int) (height * 0.8)  // Bottom scan
-                };
+            // 1. Get Image Data
+            ByteBuffer buffer = image.getPlanes()[0].getBuffer();
+            byte[] data = new byte[buffer.remaining()];
+            buffer.get(data);
 
-                int totalPoints = 0;
-                int averageCenterX = 0;
+            int width = image.getWidth();
+            int height = image.getHeight();
 
-                // --- Scan for the line at multiple points ---
-                for (int y : scanlinesY) {
-                    int trackCenter = findTrackCenterAdaptive(imageProxy, y);
-                    if (trackCenter != -1) {
-                        averageCenterX += trackCenter;
-                        totalPoints++;
+            // 2. Initialize Debug Bitmap
+            if (debugBitmap == null || debugBitmap.getWidth() != width || debugBitmap.getHeight() != height) {
+                debugBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                debugCanvas = new android.graphics.Canvas(debugBitmap);
+            }
+
+            // Clear previous drawing
+            debugBitmap.eraseColor(android.graphics.Color.TRANSPARENT);
+
+            // 3. Define Region of Interest (FULL SCREEN SCAN as requested)
+            int startRow = 0;
+            int endRow = height - 1;
+
+            // Draw the ROI Box (Blue) - Covering the whole area
+            debugCanvas.drawRect(0, startRow, width, endRow, boxPaint);
+
+            long sumX = 0;
+            int count = 0;
+            int threshold = 100; // Tune this threshold (0-255)
+
+            // 4. Scan Loop
+            int step = 10; // Skip pixels for speed
+            for (int y = startRow; y < endRow; y += step) {
+                int rowOffset = y * width;
+                for (int x = 0; x < width; x += step) {
+                    int index = rowOffset + x;
+                    if (index >= data.length) continue;
+
+                    int pixelVal = data[index] & 0xFF;
+
+                    if (pixelVal < threshold) {
+                        sumX += x;
+                        count++;
+                        // DRAW GREEN DOT
+                        debugCanvas.drawPoint(x, y, pointPaint);
                     }
                 }
-
-                int targetX = -1;
-                if (totalPoints > 0) {
-                    // The target X is the average of all detected center points.
-                    targetX = averageCenterX / totalPoints;
-                }
-
-                // --- Robot Control ---
-                if (isConnected && isLineFollowingActive) {
-                    if (targetX != -1) {
-                        float error = (width / 2.0f) - targetX;
-                        int steeringCorrection = (int) (error * P_GAIN);
-                        int leftSpeed = LINE_FOLLOW_SPEED + steeringCorrection;
-                        int rightSpeed = LINE_FOLLOW_SPEED - steeringCorrection;
-
-                        orb.setMotor(ORB.M1, ORB.SPEED_MODE, -leftSpeed, 0);
-                        orb.setMotor(ORB.M4, ORB.SPEED_MODE, +rightSpeed, 0);
-                    } else {
-                        // Line is completely lost, stop the robot for safety.
-                        stopRobot();
-                    }
-                }
-
-                // --- VISUALIZATION IS REMOVED ---
-                // No drawing calls to overlayCanvas.
-                // No update to the imageView, so it remains transparent.
-
-            } finally {
-                // CRITICAL: Always close the imageProxy
-                imageProxy.close();
-            }
-        }
-
-
-         // Finds the center of a dark track using an adaptive threshold.
-         // This is much more robust to lighting changes than a fixed threshold.
-
-        @SuppressLint("UnsafeOptInUsageError")
-        private int findTrackCenterAdaptive(ImageProxy image, int y) {
-            Bitmap bm = image.toBitmap();
-            int width = bm.getWidth();
-            int startOfTrack = -1;
-            int endOfTrack = -1;
-
-            int minBrightness = 255;
-            int maxBrightness = 0;
-
-            // 1. First Pass: Find min/max brightness
-            for (int x = 0; x < width; x++) {
-                int pixel = bm.getPixel(x, y);
-                int brightness = (Color.red(pixel) + Color.green(pixel) + Color.blue(pixel)) / 3;
-                if (brightness < minBrightness) minBrightness = brightness;
-                if (brightness > maxBrightness) maxBrightness = brightness;
             }
 
-            // 2. Calculate adaptive threshold
-            int threshold = minBrightness + (maxBrightness - minBrightness) / 2;
+            // 5. Control Logic
+            int steering = 0;
+            if (count > 10) {
+                int avgX = (int) (sumX / count);
 
-            // 3. Second Pass: Find the track using the threshold
-            for (int x = 0; x < width; x++) {
-                int pixel = bm.getPixel(x, y);
-                int brightness = (Color.red(pixel) + Color.green(pixel) + Color.blue(pixel)) / 3;
+                // DRAW RED LINE at center
+                debugCanvas.drawLine(avgX, startRow, avgX, endRow, linePaint);
 
-                if (brightness < threshold) {
-                    if (startOfTrack == -1) {
-                        startOfTrack = x;
-                    }
-                    endOfTrack = x;
+                int error = avgX - (width / 2);
+                steering = (int) (error * P_GAIN);
+            }
+
+            // 6. Update UI
+            runOnUiThread(() -> {
+                imageView.setImageBitmap(debugBitmap);
+                // If the image looks sideways, you can uncomment this:
+                  imageView.setRotation(90);
+            });
+
+            // 7. Send Motor Commands
+            if (isConnected) {
+                if (count > 10) {
+                    int baseSpeed = LINE_FOLLOW_SPEED;
+                    int leftSpeed = baseSpeed + steering;
+                    int rightSpeed = baseSpeed - steering;
+
+                    leftSpeed = Math.max(-1000, Math.min(1000, leftSpeed));
+                    rightSpeed = Math.max(-1000, Math.min(1000, rightSpeed));
+
+                    orb.setMotor(ORB.M1, ORB.SPEED_MODE, -leftSpeed, 0);
+                    orb.setMotor(ORB.M4, ORB.SPEED_MODE, rightSpeed, 0);
+                } else {
+                    stopRobot();
                 }
             }
 
-            if (startOfTrack != -1 && (endOfTrack - startOfTrack) > 10) {
-                return startOfTrack + ((endOfTrack - startOfTrack) / 2);
-            }
-
-            return -1; // Track not found
+            image.close();
         }
     }
-***/
 
-// --- Image Analyzer with ADVANCED TARGETING VISUALIZATION ---
-private class MyAnalyzer implements ImageAnalysis.Analyzer {@SuppressLint("UnsafeOptInUsageError")
-@Override
-public void analyze(@NonNull ImageProxy imageProxy) {
-    try {
-        // The main logic is now detection, targeting, and control.
-        // Visualization is removed for a clean UI.
 
-        int height = imageProxy.getHeight();
-        int width = imageProxy.getWidth();
 
-        // 1. Scan the image at two points to determine the line's angle
-        int topY = (int) (height * 0.4);
-        int bottomY = (int) (height * 0.8);
-
-        int topX = findTrackCenterAdaptive(imageProxy, topY);
-        int bottomX = findTrackCenterAdaptive(imageProxy, bottomY);
-
-        // 2. Determine the robot's target point and control logic
-        if (isConnected && isLineFollowingActive) {
-            if (topX != -1 && bottomX != -1) {
-                // --- We have two points, so we can calculate the line's angle and position ---
-
-                // Calculate the horizontal offset of the line from the center at the bottom of the view
-                float currentOffset = bottomX - (width / 2.0f);
-
-                // Calculate the angle of the line. A positive angle means the line is pointing to the right.
-                // A small angle correction factor might be needed depending on camera lens distortion.
-                float angle = (float) Math.toDegrees(Math.atan2(topX - bottomX, topY - bottomY));
-
-                // --- ADVANCED CONTROL ---
-                // The error is a combination of the current offset and the angle of the line.
-                // This acts like a "PD" (Proportional-Derivative) controller.
-                // The 'offset' is the P term (where are we now?)
-                // The 'angle' is the D term (where are we going?)
-                float error = currentOffset * 0.5f + angle * 1.5f;
-
-                int steeringCorrection = (int) (error * P_GAIN);
-                int leftSpeed = LINE_FOLLOW_SPEED + steeringCorrection;
-                int rightSpeed = LINE_FOLLOW_SPEED - steeringCorrection;
-
-                orb.setMotor(ORB.M1, ORB.SPEED_MODE, -leftSpeed, 0);
-                orb.setMotor(ORB.M4, ORB.SPEED_MODE, +rightSpeed, 0);
-
-            } else if (bottomX != -1) {
-                // --- We only see the bottom of the line, use simple control ---
-                float error = (width / 2.0f) - bottomX;
-                int steeringCorrection = (int) (error * P_GAIN);
-                int leftSpeed = LINE_FOLLOW_SPEED + steeringCorrection;
-                int rightSpeed = LINE_FOLLOW_SPEED - steeringCorrection;
-                orb.setMotor(ORB.M1, ORB.SPEED_MODE, -leftSpeed, 0);
-                orb.setMotor(ORB.M4, ORB.SPEED_MODE, +rightSpeed, 0);
-            } else {
-                // Line is completely lost, stop the robot for safety.
-                stopRobot();
-            }
-        }
-
-        // --- VISUALIZATION IS REMOVED as per the previous request ---
-
-    } finally {
-        // CRITICAL: Always close the imageProxy
-        imageProxy.close();
-    }
-}
-
-    /**
-     * Finds the center of a dark track using an adaptive threshold.
-     * This is much more robust to lighting changes than a fixed threshold.
-     */
-    @SuppressLint("UnsafeOptInUsageError")
-    private int findTrackCenterAdaptive(ImageProxy image, int y) {
-        Bitmap bm = image.toBitmap();
-        int width = bm.getWidth();
-        int startOfTrack = -1;
-        int endOfTrack = -1;
-
-        int minBrightness = 255;
-        int maxBrightness = 0;
-
-        // 1. First Pass: Find min/max brightness
-        for (int x = 0; x < width; x++) {
-            int pixel = bm.getPixel(x, y);
-            int brightness = (Color.red(pixel) + Color.green(pixel) + Color.blue(pixel)) / 3;
-            if (brightness < minBrightness) minBrightness = brightness;
-            if (brightness > maxBrightness) maxBrightness = brightness;
-        }
-
-        // 2. Calculate adaptive threshold
-        int threshold = minBrightness + (maxBrightness - minBrightness) / 2;
-
-        // 3. Second Pass: Find the track using the threshold
-        for (int x = 0; x < width; x++) {
-            int pixel = bm.getPixel(x, y);
-            int brightness = (Color.red(pixel) + Color.green(pixel) + Color.blue(pixel)) / 3;
-
-            if (brightness < threshold) {
-                if (startOfTrack == -1) {
-                    startOfTrack = x;
-                }
-                endOfTrack = x;
-            }
-        }
-
-        if (startOfTrack != -1 && (endOfTrack - startOfTrack) > 10) {
-            return startOfTrack + ((endOfTrack - startOfTrack) / 2);
-        }
-
-        return -1; // Track not found
-    }
-}
-    // --- CAMERA AND LINE FOLLOWING LOGIC ---
+    // --- CAMERA LOGIC ---
 
     public void onClickToggleCamera(View v) {
         if (isCameraPreviewOn) {
@@ -333,11 +231,11 @@ public void analyze(@NonNull ImageProxy imageProxy) {
     }
 
     public void onClickToggleLineFollowing(View v) {
-        isLineFollowingActive = !isLineFollowingActive; // Toggle the state
+        isLineFollowingActive = !isLineFollowingActive;
         if (!isLineFollowingActive && isConnected) {
-            stopRobot(); // Stop motors when switching to manual
+            stopRobot();
         }
-        updateUI(); // Update button text and joystick state
+        updateUI();
     }
 
     private void startCamera() {
@@ -359,21 +257,25 @@ public void analyze(@NonNull ImageProxy imageProxy) {
             cameraProvider.unbindAll();
         }
         isCameraPreviewOn = false;
-        isLineFollowingActive = false; // Always turn off line following when camera is off
+        isLineFollowingActive = false;
         if (isConnected) stopRobot();
         updateUI();
-        Toast.makeText(this, "Camera Off", Toast.LENGTH_SHORT).show();
     }
 
     private void bindCameraUseCases() {
+        if (cameraProvider == null) return;
+
         cameraProvider.unbindAll();
 
         Preview preview = new Preview.Builder().build();
         preview.setSurfaceProvider(previewView.getSurfaceProvider());
 
         imageAnalysis = new ImageAnalysis.Builder()
+                // STRATEGY_KEEP_ONLY_LATEST ensures we process only the newest frame
+                // and drop old ones if processing is slow.
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build();
+
         imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(this), new MyAnalyzer());
 
         CameraSelector cameraSelector = new CameraSelector.Builder()
@@ -387,9 +289,8 @@ public void analyze(@NonNull ImageProxy imageProxy) {
 
     @SuppressLint("SetTextI18n")
     private void updateUI() {
-        // Bluetooth connection state
         if (isConnected) {
-            statusText.setText("Status: Connected to " + orb.getDeviceName());
+            statusText.setText("Status: Connected");
             connectButton.setText("Disconnect");
             batteryButton.setEnabled(true);
         } else {
@@ -398,19 +299,16 @@ public void analyze(@NonNull ImageProxy imageProxy) {
             batteryButton.setEnabled(false);
         }
 
-        // Camera and Line Following state
         cameraCard.setVisibility(isCameraPreviewOn ? View.VISIBLE : View.GONE);
         followLineButton.setVisibility(isCameraPreviewOn && isConnected ? View.VISIBLE : View.GONE);
 
         if (isCameraPreviewOn) {
-            // Manual vs. Automatic control
             boolean manualControlEnabled = !isLineFollowingActive;
             joystickBase.setAlpha(manualControlEnabled ? 1.0f : 0.3f);
             joystickHandle.setAlpha(manualControlEnabled ? 1.0f : 0.3f);
             speedSlider.setEnabled(manualControlEnabled);
             followLineButton.setText(isLineFollowingActive ? "Stop Line Follow" : "Start Line Follow");
         } else {
-            // When camera is off, joystick is enabled if connected
             joystickBase.setAlpha(isConnected ? 1.0f : 0.3f);
             joystickHandle.setAlpha(isConnected ? 1.0f : 0.3f);
             speedSlider.setEnabled(isConnected);
@@ -418,7 +316,7 @@ public void analyze(@NonNull ImageProxy imageProxy) {
     }
 
 
-    // --- PERMISSION AND ACTIVITY RESULTS ---
+    // --- PERMISSIONS ---
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
@@ -443,11 +341,10 @@ public void analyze(@NonNull ImageProxy imageProxy) {
         if (requestCode == REQUEST_ENABLE_BT && resultCode == RESULT_OK && data != null) {
             BluetoothDevice device = BT_DeviceListActivity.getDeviceFromIntent(data);
             if (device != null) connectToDevice(device);
-            else Toast.makeText(this, "Failed to get device.", Toast.LENGTH_SHORT).show();
         }
     }
 
-    // --- ROBOT AND JOYSTICK CONTROL LOGIC ---
+    // --- ROBOT LOGIC ---
     public void onClickConnect(View v) {
         if (isConnected) {
             orb.close();
@@ -455,6 +352,9 @@ public void analyze(@NonNull ImageProxy imageProxy) {
             updateUI();
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             startDeviceListActivity();
+        } else {
+            // Fallback for older Android versions if needed
+            BT_DeviceListActivity.start(this, REQUEST_ENABLE_BT);
         }
     }
 
@@ -500,7 +400,7 @@ public void analyze(@NonNull ImageProxy imageProxy) {
             joystickBaseRadius = joystickBase.getWidth() / 2f;
         });
         joystickBase.setOnTouchListener((view, event) -> {
-            if (!isConnected || isLineFollowingActive) return false; // Disable if not connected OR line following
+            if (!isConnected || isLineFollowingActive) return false;
 
             switch (event.getAction()) {
                 case MotionEvent.ACTION_DOWN:
