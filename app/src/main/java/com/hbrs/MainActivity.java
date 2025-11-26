@@ -71,7 +71,10 @@ public class MainActivity extends AppCompatActivity {
     private boolean isLineFollowingActive = false;
     // Adjusted base speed (lower is safer for testing)
     private final int LINE_FOLLOW_SPEED = 600;
-    private final float P_GAIN = 1.5f; // Sensitivity
+    // Gain for the positional offset (how far left/right)
+    private final float P_GAIN_POS = 1.2f;
+    // Gain for the angle (how sharp is the turn)
+    private final float P_GAIN_ANGLE = 15.0f;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -95,15 +98,18 @@ public class MainActivity extends AppCompatActivity {
         updateUI();
     }
 
-    // --- IMPROVED FAST ANALYZER ---
-    // --- DEBUG ANALYZER WITH VISUALIZATION ---
-
+    // --- IMPROVED PCA ANALYZER (portrait -> rotated, ROI bottom, stable control) ---
     private class MyAnalyzer implements ImageAnalysis.Analyzer {
 
         private Bitmap debugBitmap;
         private android.graphics.Canvas debugCanvas;
-        private android.graphics.Paint pointPaint;        private android.graphics.Paint linePaint;
+        private android.graphics.Paint pointPaint;
+        private android.graphics.Paint linePaint;
         private android.graphics.Paint boxPaint;
+
+        // smoothing state
+        private float smoothedAngle = 0f;
+        private boolean hasSmoothed = false;
 
         public MyAnalyzer() {
             pointPaint = new android.graphics.Paint();
@@ -112,7 +118,7 @@ public class MainActivity extends AppCompatActivity {
 
             linePaint = new android.graphics.Paint();
             linePaint.setColor(android.graphics.Color.RED);
-            linePaint.setStrokeWidth(5);
+            linePaint.setStrokeWidth(8);
 
             boxPaint = new android.graphics.Paint();
             boxPaint.setColor(android.graphics.Color.BLUE);
@@ -127,78 +133,175 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
 
-            // 1. Get Image Data
+            // 1) Read Y-plane (grayscale) into byte[]
             ByteBuffer buffer = image.getPlanes()[0].getBuffer();
             byte[] data = new byte[buffer.remaining()];
             buffer.get(data);
 
-            int width = image.getWidth();
-            int height = image.getHeight();
+            int srcWidth = image.getWidth();
+            int srcHeight = image.getHeight();
 
-            // 2. Initialize Debug Bitmap
+            // NOTE: you're testing in portrait mode -> rotate the Y plane 90deg clockwise
+            // so that "up" in the processed frame corresponds to robot forward
+            byte[] rotated = new byte[data.length];
+            rotateY90Clockwise(data, rotated, srcWidth, srcHeight);
+
+            // After rotation, processed width/height swap
+            int width = srcHeight;   // rotated width
+            int height = srcWidth;   // rotated height
+
+            // 2) Prepare debug bitmap of rotated size
             if (debugBitmap == null || debugBitmap.getWidth() != width || debugBitmap.getHeight() != height) {
                 debugBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
                 debugCanvas = new android.graphics.Canvas(debugBitmap);
             }
 
-            // Clear previous drawing
             debugBitmap.eraseColor(android.graphics.Color.TRANSPARENT);
 
-            // 3. Define Region of Interest (FULL SCREEN SCAN as requested)
-            int startRow = 0;
-            int endRow = height - 1;
 
-            // Draw the ROI Box (Blue) - Covering the whole area
+            // --- ROI (Region of Interest) CONTROL ---
+            // The ROI determines how big the blue box is.
+            // height = frame height AFTER rotation
+            // width  = frame width AFTER rotation
+            //
+            // You can tune the ROI by changing 'startRow' and 'endRow':
+            //
+            // 1) startRow controls how FAR DOWN from the top the box begins.
+            //    - startRow = 0 → full height (largest box)
+            //    - startRow = height * 0.5 → bottom 50%
+            //    - startRow = height * 0.66 → bottom 33% (small box)
+            //
+            // 2) endRow controls how FAR it goes downward.
+            //    - endRow = height - 1 → goes to the bottom (recommended)
+            //    - Smaller endRow → shorter box
+            //
+            // 3) If you want to also limit width (make box narrower):
+            //      leftX  = width * 0.2   // 20% from the left
+            //      rightX = width * 0.8   // 80% from the left
+            //
+            // Example:
+            // int startRow = (int)(height * 0.50f); // bottom half
+            // int endRow   = height - 1;            // down to the bottom
+            // int leftX    = 0;                      // full width
+            // int rightX   = width - 1;              // full width
+
+            // 3) ROI: bottom third of the rotated image (closer to robot)
+            int startRow = 0;
+            // int endRow = height - 1;
+            // int startRow = 0; full view
+            int endRow = (int) (height * 0.5f);
+
             debugCanvas.drawRect(0, startRow, width, endRow, boxPaint);
 
+            // 4) PCA data collection (single pass)
             long sumX = 0;
+            long sumY = 0;
             int count = 0;
-            int threshold = 100; // Tune this threshold (0-255)
+            final int threshold = 60;     // tuned for your image, tweak if necessary
+            final int step = 10;           // pixel step for speed/coverage
 
-            // 4. Scan Loop
-            int step = 10; // Skip pixels for speed
             for (int y = startRow; y < endRow; y += step) {
                 int rowOffset = y * width;
                 for (int x = 0; x < width; x += step) {
                     int index = rowOffset + x;
-                    if (index >= data.length) continue;
-
-                    int pixelVal = data[index] & 0xFF;
-
+                    if (index >= rotated.length) continue;
+                    int pixelVal = rotated[index] & 0xFF;
                     if (pixelVal < threshold) {
                         sumX += x;
+                        sumY += y;
                         count++;
-                        // DRAW GREEN DOT
                         debugCanvas.drawPoint(x, y, pointPaint);
                     }
                 }
             }
 
-            // 5. Control Logic
             int steering = 0;
-            if (count > 10) {
-                int avgX = (int) (sumX / count);
 
-                // DRAW RED LINE at center
-                debugCanvas.drawLine(avgX, startRow, avgX, endRow, linePaint);
+            if (count > 30) { // enough points to do PCA reliably
+                // centroid
+                float meanX = (float) sumX / count;
+                float meanY = (float) sumY / count;
 
-                int error = avgX - (width / 2);
-                steering = (int) (error * P_GAIN);
+                // covariance
+                double covXX = 0;
+                double covYY = 0;
+                double covXY = 0;
+
+                for (int y = startRow; y < endRow; y += step) {
+                    int rowOffset = y * width;
+                    for (int x = 0; x < width; x += step) {
+                        int index = rowOffset + x;
+                        if (index >= rotated.length) continue;
+                        if ((rotated[index] & 0xFF) < threshold) {
+                            double dx = x - meanX;
+                            double dy = y - meanY;
+                            covXX += dx * dx;
+                            covYY += dy * dy;
+                            covXY += dx * dy;
+                        }
+                    }
+                }
+
+                // principal axis angle (radians) relative to X axis
+                double angleRad = 0.5 * Math.atan2(2.0 * covXY, covXX - covYY);
+
+                // Ensure a stable orientation direction:
+                // We want the principal axis to point "forward" (negative Y in image).
+                // The desired heading (robot forward in rotated frame) is -PI/2.
+                double desiredHeading = -Math.PI / 2.0;
+                double errorAngle = normalizeAngle(angleRad - desiredHeading); // [-pi, pi]
+
+                // simple EMA smoothing for angle (prevents large jumps)
+                float angleDeg = (float) Math.toDegrees(angleRad);
+                if (!hasSmoothed) {
+                    smoothedAngle = angleDeg;
+                    hasSmoothed = true;
+                } else {
+                    final float alpha = 0.20f; // smoothing factor, tweak 0.1..0.4
+                    smoothedAngle = smoothedAngle * (1.0f - alpha) + angleDeg * alpha;
+                }
+
+                // draw PCA orientation line (using smoothed angle)
+                float smoothedRad = (float) Math.toRadians(smoothedAngle);
+                float len = Math.min(width, height) * 0.9f;
+                float endX = meanX + len * (float) Math.cos(smoothedRad);
+                float endY = meanY + len * (float) Math.sin(smoothedRad);
+                debugCanvas.drawLine(meanX, meanY, endX, endY, linePaint);
+
+                // Control law (tuned, conservative)
+                final float KP_POS = 0.63f;   // position gain (pixels -> speed)
+                final float KP_ANG = 0.11f;  // angle gain (degrees -> speed)
+
+                float errorPos = meanX - (width / 2.0f); // positive -> line is to the right
+
+                // angle error in degrees for mixing
+                float errorAngleDeg = (float) Math.toDegrees(errorAngle);
+
+                // combine with reasonable scaling
+                float steeringF = KP_POS * errorPos + KP_ANG * errorAngleDeg;
+
+                // integer steering and clamp (you can adjust max steering)
+                steering = Math.round(steeringF);
+                final int MAX_STEER = 800;
+                steering = Math.max(-MAX_STEER, Math.min(MAX_STEER, steering));
             }
 
-            // 6. Update UI
+            // Update UI (show rotated debugBitmap)
             runOnUiThread(() -> {
                 imageView.setImageBitmap(debugBitmap);
-                // If the image looks sideways, you can uncomment this:
-                  imageView.setRotation(90);
+                // IMPORTANT: Do not rotate the view. We already rotated the data.
+                imageView.setRotation(0);
             });
 
-            // 7. Send Motor Commands
+            // 7) Send Motor Commands (keep your motor API calls unchanged)
             if (isConnected) {
-                if (count > 10) {
+                if (count > 30) {
                     int baseSpeed = LINE_FOLLOW_SPEED;
-                    int leftSpeed = baseSpeed + steering;
-                    int rightSpeed = baseSpeed - steering;
+
+                    // Mixing: positive steering -> turn right: decrease left, increase right
+                    // (If the robot turns the wrong way, invert steering sign here)
+                    int leftSpeed = baseSpeed - steering;
+                    int rightSpeed = baseSpeed + steering;
 
                     leftSpeed = Math.max(-1000, Math.min(1000, leftSpeed));
                     rightSpeed = Math.max(-1000, Math.min(1000, rightSpeed));
@@ -211,6 +314,33 @@ public class MainActivity extends AppCompatActivity {
             }
 
             image.close();
+        }
+
+        // rotate Y-plane 90° clockwise: dstWidth = srcHeight, dstHeight = srcWidth
+        private void rotateY90Clockwise(byte[] src, byte[] dst, int srcWidth, int srcHeight) {
+            // src index: y * srcWidth + x
+            // dst index: x' * dstWidth + y' where after rotation x' = y, y' = dstHeight - 1 - x
+            // Equivalent mapping for 90deg CW:
+            // dst[(x) * srcHeight + (srcHeight - 1 - y)] = src[y * srcWidth + x]
+            int dstWidth = srcHeight;
+            int dstHeight = srcWidth;
+            for (int y = 0; y < srcHeight; y++) {
+                int rowOffset = y * srcWidth;
+                for (int x = 0; x < srcWidth; x++) {
+                    int sIdx = rowOffset + x;
+                    int dIdx = x * dstWidth + (dstWidth - 1 - y);
+                    if (sIdx >= 0 && sIdx < src.length && dIdx >= 0 && dIdx < dst.length) {
+                        dst[dIdx] = src[sIdx];
+                    }
+                }
+            }
+        }
+
+        // normalize angle to [-PI, PI]
+        private double normalizeAngle(double a) {
+            while (a <= -Math.PI) a += 2.0 * Math.PI;
+            while (a > Math.PI) a -= 2.0 * Math.PI;
+            return a;
         }
     }
 
@@ -271,8 +401,6 @@ public class MainActivity extends AppCompatActivity {
         preview.setSurfaceProvider(previewView.getSurfaceProvider());
 
         imageAnalysis = new ImageAnalysis.Builder()
-                // STRATEGY_KEEP_ONLY_LATEST ensures we process only the newest frame
-                // and drop old ones if processing is slow.
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build();
 
@@ -315,7 +443,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-
     // --- PERMISSIONS ---
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
@@ -353,7 +480,6 @@ public class MainActivity extends AppCompatActivity {
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             startDeviceListActivity();
         } else {
-            // Fallback for older Android versions if needed
             BT_DeviceListActivity.start(this, REQUEST_ENABLE_BT);
         }
     }
