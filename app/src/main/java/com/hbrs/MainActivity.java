@@ -6,12 +6,14 @@ import android.bluetooth.BluetoothDevice;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.MotionEvent;
 import android.view.View;
 import android.widget.Button;
-import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -37,6 +39,8 @@ import com.hbrs.ORB.ORB;
 
 import java.nio.ByteBuffer;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -46,7 +50,7 @@ public class MainActivity extends AppCompatActivity {
     private static final int REQUEST_CAMERA_PERMISSION = 3;
 
     // UI Elements
-    private Button connectButton, batteryButton, followLineButton;
+    private Button connectButton, batteryButton, followLineButton, followBallButton;
     private TextView statusText;
     private View joystickBase, joystickHandle;
     private Slider speedSlider;
@@ -66,25 +70,27 @@ public class MainActivity extends AppCompatActivity {
     private ProcessCameraProvider cameraProvider;
     private boolean isCameraPreviewOn = false;
     private ImageAnalysis imageAnalysis;
+    private ExecutorService cameraExecutor;
 
-    // Line Following control
-    private boolean isLineFollowingActive = false;
-    // Adjusted base speed (lower is safer for testing)
-    private final int LINE_FOLLOW_SPEED = 600;
-    // Gain for the positional offset (how far left/right)
-    private final float P_GAIN_POS = 1.2f;
-    // Gain for the angle (how sharp is the turn)
-    private final float P_GAIN_ANGLE = 15.0f;
+    // Logic Modes
+    private boolean isLineMode = false;
+    private boolean isBallMode = false;
+
+    // Configuration
+    private final int AUTO_SPEED = 600;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        cameraExecutor = Executors.newSingleThreadExecutor();
+
         // Initialize all UI elements
         connectButton = findViewById(R.id.btn_connect);
         batteryButton = findViewById(R.id.btn_get_battery);
         followLineButton = findViewById(R.id.btn_follow_line);
+        followBallButton = findViewById(R.id.btn_follow_ball);
         statusText = findViewById(R.id.status_text);
         joystickBase = findViewById(R.id.joystick_base);
         joystickHandle = findViewById(R.id.joystick_handle);
@@ -98,275 +104,87 @@ public class MainActivity extends AppCompatActivity {
         updateUI();
     }
 
-    // --- IMPROVED PCA ANALYZER (portrait -> rotated, ROI bottom, stable control) ---
-    private class MyAnalyzer implements ImageAnalysis.Analyzer {
+    // --- BUTTON CLICKS ---
 
-        private Bitmap debugBitmap;
-        private android.graphics.Canvas debugCanvas;
-        private android.graphics.Paint pointPaint;
-        private android.graphics.Paint linePaint;
-        private android.graphics.Paint boxPaint;
-
-        // smoothing state
-        private float smoothedAngle = 0f;
-        private boolean hasSmoothed = false;
-
-        public MyAnalyzer() {
-            pointPaint = new android.graphics.Paint();
-            pointPaint.setColor(android.graphics.Color.GREEN);
-            pointPaint.setStrokeWidth(5);
-
-            linePaint = new android.graphics.Paint();
-            linePaint.setColor(android.graphics.Color.RED);
-            linePaint.setStrokeWidth(8);
-
-            boxPaint = new android.graphics.Paint();
-            boxPaint.setColor(android.graphics.Color.BLUE);
-            boxPaint.setStyle(android.graphics.Paint.Style.STROKE);
-            boxPaint.setStrokeWidth(3);
-        }
-
-        @Override
-        public void analyze(@NonNull ImageProxy image) {
-            if (!isLineFollowingActive) {
-                image.close();
-                return;
-            }
-
-            // 1) Read Y-plane (grayscale) into byte[]
-            ByteBuffer buffer = image.getPlanes()[0].getBuffer();
-            byte[] data = new byte[buffer.remaining()];
-            buffer.get(data);
-
-            int srcWidth = image.getWidth();
-            int srcHeight = image.getHeight();
-
-            // NOTE: you're testing in portrait mode -> rotate the Y plane 90deg clockwise
-            // so that "up" in the processed frame corresponds to robot forward
-            byte[] rotated = new byte[data.length];
-            rotateY90Clockwise(data, rotated, srcWidth, srcHeight);
-
-            // After rotation, processed width/height swap
-            int width = srcHeight;   // rotated width
-            int height = srcWidth;   // rotated height
-
-            // 2) Prepare debug bitmap of rotated size
-            if (debugBitmap == null || debugBitmap.getWidth() != width || debugBitmap.getHeight() != height) {
-                debugBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-                debugCanvas = new android.graphics.Canvas(debugBitmap);
-            }
-
-            debugBitmap.eraseColor(android.graphics.Color.TRANSPARENT);
-
-
-            // --- ROI (Region of Interest) CONTROL ---
-            // The ROI determines how big the blue box is.
-            // height = frame height AFTER rotation
-            // width  = frame width AFTER rotation
-            //
-            // You can tune the ROI by changing 'startRow' and 'endRow':
-            //
-            // 1) startRow controls how FAR DOWN from the top the box begins.
-            //    - startRow = 0 → full height (largest box)
-            //    - startRow = height * 0.5 → bottom 50%
-            //    - startRow = height * 0.66 → bottom 33% (small box)
-            //
-            // 2) endRow controls how FAR it goes downward.
-            //    - endRow = height - 1 → goes to the bottom (recommended)
-            //    - Smaller endRow → shorter box
-            //
-            // 3) If you want to also limit width (make box narrower):
-            //      leftX  = width * 0.2   // 20% from the left
-            //      rightX = width * 0.8   // 80% from the left
-            //
-            // Example:
-            // int startRow = (int)(height * 0.50f); // bottom half
-            // int endRow   = height - 1;            // down to the bottom
-            // int leftX    = 0;                      // full width
-            // int rightX   = width - 1;              // full width
-
-            // 3) ROI: bottom third of the rotated image (closer to robot)
-            int startRow = 0;
-            // int endRow = height - 1;
-            // int startRow = 0; full view
-            int endRow = (int) (height * 0.5f);
-
-            debugCanvas.drawRect(0, startRow, width, endRow, boxPaint);
-
-            // 4) PCA data collection (single pass)
-            long sumX = 0;
-            long sumY = 0;
-            int count = 0;
-            final int threshold = 60;     // tuned for your image, tweak if necessary
-            final int step = 10;           // pixel step for speed/coverage
-
-            for (int y = startRow; y < endRow; y += step) {
-                int rowOffset = y * width;
-                for (int x = 0; x < width; x += step) {
-                    int index = rowOffset + x;
-                    if (index >= rotated.length) continue;
-                    int pixelVal = rotated[index] & 0xFF;
-                    if (pixelVal < threshold) {
-                        sumX += x;
-                        sumY += y;
-                        count++;
-                        debugCanvas.drawPoint(x, y, pointPaint);
-                    }
-                }
-            }
-
-            int steering = 0;
-
-            if (count > 30) { // enough points to do PCA reliably
-                // centroid
-                float meanX = (float) sumX / count;
-                float meanY = (float) sumY / count;
-
-                // covariance
-                double covXX = 0;
-                double covYY = 0;
-                double covXY = 0;
-
-                for (int y = startRow; y < endRow; y += step) {
-                    int rowOffset = y * width;
-                    for (int x = 0; x < width; x += step) {
-                        int index = rowOffset + x;
-                        if (index >= rotated.length) continue;
-                        if ((rotated[index] & 0xFF) < threshold) {
-                            double dx = x - meanX;
-                            double dy = y - meanY;
-                            covXX += dx * dx;
-                            covYY += dy * dy;
-                            covXY += dx * dy;
-                        }
-                    }
-                }
-
-                // principal axis angle (radians) relative to X axis
-                double angleRad = 0.5 * Math.atan2(2.0 * covXY, covXX - covYY);
-
-                // Ensure a stable orientation direction:
-                // We want the principal axis to point "forward" (negative Y in image).
-                // The desired heading (robot forward in rotated frame) is -PI/2.
-                double desiredHeading = -Math.PI / 2.0;
-                double errorAngle = normalizeAngle(angleRad - desiredHeading); // [-pi, pi]
-
-                // simple EMA smoothing for angle (prevents large jumps)
-                float angleDeg = (float) Math.toDegrees(angleRad);
-                if (!hasSmoothed) {
-                    smoothedAngle = angleDeg;
-                    hasSmoothed = true;
-                } else {
-                    final float alpha = 0.20f; // smoothing factor, tweak 0.1..0.4
-                    smoothedAngle = smoothedAngle * (1.0f - alpha) + angleDeg * alpha;
-                }
-
-                // draw PCA orientation line (using smoothed angle)
-                float smoothedRad = (float) Math.toRadians(smoothedAngle);
-                float len = Math.min(width, height) * 0.9f;
-                float endX = meanX + len * (float) Math.cos(smoothedRad);
-                float endY = meanY + len * (float) Math.sin(smoothedRad);
-                debugCanvas.drawLine(meanX, meanY, endX, endY, linePaint);
-
-                // Control law (tuned, conservative)
-                final float KP_POS = 0.63f;   // position gain (pixels -> speed)
-                final float KP_ANG = 0.11f;  // angle gain (degrees -> speed)
-
-                float errorPos = meanX - (width / 2.0f); // positive -> line is to the right
-
-                // angle error in degrees for mixing
-                float errorAngleDeg = (float) Math.toDegrees(errorAngle);
-
-                // combine with reasonable scaling
-                float steeringF = KP_POS * errorPos + KP_ANG * errorAngleDeg;
-
-                // integer steering and clamp (you can adjust max steering)
-                steering = Math.round(steeringF);
-                final int MAX_STEER = 800;
-                steering = Math.max(-MAX_STEER, Math.min(MAX_STEER, steering));
-            }
-
-            // Update UI (show rotated debugBitmap)
-            runOnUiThread(() -> {
-                imageView.setImageBitmap(debugBitmap);
-                // IMPORTANT: Do not rotate the view. We already rotated the data.
-                imageView.setRotation(0);
-            });
-
-            // 7) Send Motor Commands (keep your motor API calls unchanged)
-            if (isConnected) {
-                if (count > 30) {
-                    int baseSpeed = LINE_FOLLOW_SPEED;
-
-                    // Mixing: positive steering -> turn right: decrease left, increase right
-                    // (If the robot turns the wrong way, invert steering sign here)
-                    int leftSpeed = baseSpeed - steering;
-                    int rightSpeed = baseSpeed + steering;
-
-                    leftSpeed = Math.max(-1000, Math.min(1000, leftSpeed));
-                    rightSpeed = Math.max(-1000, Math.min(1000, rightSpeed));
-
-                    orb.setMotor(ORB.M1, ORB.SPEED_MODE, -leftSpeed, 0);
-                    orb.setMotor(ORB.M4, ORB.SPEED_MODE, rightSpeed, 0);
-                } else {
-                    stopRobot();
-                }
-            }
-
-            image.close();
-        }
-
-        // rotate Y-plane 90° clockwise: dstWidth = srcHeight, dstHeight = srcWidth
-        private void rotateY90Clockwise(byte[] src, byte[] dst, int srcWidth, int srcHeight) {
-            // src index: y * srcWidth + x
-            // dst index: x' * dstWidth + y' where after rotation x' = y, y' = dstHeight - 1 - x
-            // Equivalent mapping for 90deg CW:
-            // dst[(x) * srcHeight + (srcHeight - 1 - y)] = src[y * srcWidth + x]
-            int dstWidth = srcHeight;
-            int dstHeight = srcWidth;
-            for (int y = 0; y < srcHeight; y++) {
-                int rowOffset = y * srcWidth;
-                for (int x = 0; x < srcWidth; x++) {
-                    int sIdx = rowOffset + x;
-                    int dIdx = x * dstWidth + (dstWidth - 1 - y);
-                    if (sIdx >= 0 && sIdx < src.length && dIdx >= 0 && dIdx < dst.length) {
-                        dst[dIdx] = src[sIdx];
-                    }
-                }
-            }
-        }
-
-        // normalize angle to [-PI, PI]
-        private double normalizeAngle(double a) {
-            while (a <= -Math.PI) a += 2.0 * Math.PI;
-            while (a > Math.PI) a -= 2.0 * Math.PI;
-            return a;
-        }
-    }
-
-
-
-    // --- CAMERA LOGIC ---
-
-    public void onClickToggleCamera(View v) {
+    public void onClickToggleCamera(View view) {
         if (isCameraPreviewOn) {
-            stopCamera();
+            // Turn Camera OFF
+            if (cameraProvider != null) {
+                cameraProvider.unbindAll();
+            }
+            isCameraPreviewOn = false;
+
+            // Also stop any active vision modes when turning off camera
+            stopVision();
         } else {
+            // Turn Camera ON
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
                 startCamera();
+                // We don't start a specific mode yet; we just show the preview
+                // The user will press "Line" or "Ball" next.
             } else {
                 ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.CAMERA}, REQUEST_CAMERA_PERMISSION);
             }
         }
+
+        updateUI();
     }
 
     public void onClickToggleLineFollowing(View v) {
-        isLineFollowingActive = !isLineFollowingActive;
-        if (!isLineFollowingActive && isConnected) {
-            stopRobot();
+        if (isLineMode) {
+            stopVision();
+        } else {
+            startLineFollowing();
         }
         updateUI();
     }
+
+    public void onClickToggleBallFollowing(View v) {
+        if (isBallMode) {
+            stopVision();
+        } else {
+            startBallFollowing();
+        }
+        updateUI();
+    }
+
+    private void startLineFollowing() {
+        stopVision(); // reset others
+        isLineMode = true;
+        if (!isCameraPreviewOn) startCamera();
+
+        // Update Analyzer
+        if (imageAnalysis != null) {
+            imageAnalysis.setAnalyzer(cameraExecutor,
+                    new LineFollowerAnalyzer(orb, imageView, isConnected, this::stopRobot));
+        }
+    }
+
+    private void startBallFollowing() {
+        stopVision(); // reset others
+        isBallMode = true;
+        if (!isCameraPreviewOn) startCamera();
+
+        // Update Analyzer
+        if (imageAnalysis != null) {
+
+            // We pass 'orb', 'imageView', the current 'isConnected' state, and the 'stopRobot' function.
+            imageAnalysis.setAnalyzer(cameraExecutor,
+                    new BallFollowerAnalyzer(orb, imageView, isConnected, this::stopRobot));
+        }
+    }
+
+    private void stopVision() {
+        isLineMode = false;
+        isBallMode = false;
+        if (imageAnalysis != null) {
+            imageAnalysis.clearAnalyzer();
+        }
+        imageView.setImageBitmap(null); // Clear overlay
+        stopRobot();
+    }
+
+    // --- CAMERA SETUP ---
 
     private void startCamera() {
         ListenableFuture<ProcessCameraProvider> cameraProviderFuture = ProcessCameraProvider.getInstance(this);
@@ -375,6 +193,11 @@ public class MainActivity extends AppCompatActivity {
                 cameraProvider = cameraProviderFuture.get();
                 bindCameraUseCases();
                 isCameraPreviewOn = true;
+
+                // Restore analyzer if mode is active
+                if (isLineMode) startLineFollowing();
+                if (isBallMode) startBallFollowing();
+
                 updateUI();
             } catch (ExecutionException | InterruptedException e) {
                 Toast.makeText(this, "Error starting camera: " + e.getMessage(), Toast.LENGTH_SHORT).show();
@@ -382,19 +205,8 @@ public class MainActivity extends AppCompatActivity {
         }, ContextCompat.getMainExecutor(this));
     }
 
-    private void stopCamera() {
-        if (cameraProvider != null) {
-            cameraProvider.unbindAll();
-        }
-        isCameraPreviewOn = false;
-        isLineFollowingActive = false;
-        if (isConnected) stopRobot();
-        updateUI();
-    }
-
     private void bindCameraUseCases() {
         if (cameraProvider == null) return;
-
         cameraProvider.unbindAll();
 
         Preview preview = new Preview.Builder().build();
@@ -404,8 +216,6 @@ public class MainActivity extends AppCompatActivity {
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build();
 
-        imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(this), new MyAnalyzer());
-
         CameraSelector cameraSelector = new CameraSelector.Builder()
                 .requireLensFacing(CameraSelector.LENS_FACING_BACK)
                 .build();
@@ -413,7 +223,7 @@ public class MainActivity extends AppCompatActivity {
         cameraProvider.bindToLifecycle(this, cameraSelector, imageAnalysis, preview);
     }
 
-    // --- UI and State Management ---
+    // --- UI & BLUETOOTH ---
 
     @SuppressLint("SetTextI18n")
     private void updateUI() {
@@ -428,50 +238,25 @@ public class MainActivity extends AppCompatActivity {
         }
 
         cameraCard.setVisibility(isCameraPreviewOn ? View.VISIBLE : View.GONE);
-        followLineButton.setVisibility(isCameraPreviewOn && isConnected ? View.VISIBLE : View.GONE);
 
-        if (isCameraPreviewOn) {
-            boolean manualControlEnabled = !isLineFollowingActive;
-            joystickBase.setAlpha(manualControlEnabled ? 1.0f : 0.3f);
-            joystickHandle.setAlpha(manualControlEnabled ? 1.0f : 0.3f);
-            speedSlider.setEnabled(manualControlEnabled);
-            followLineButton.setText(isLineFollowingActive ? "Stop Line Follow" : "Start Line Follow");
-        } else {
-            joystickBase.setAlpha(isConnected ? 1.0f : 0.3f);
-            joystickHandle.setAlpha(isConnected ? 1.0f : 0.3f);
-            speedSlider.setEnabled(isConnected);
-        }
+        // Mode Buttons
+        int modeButtonVisibility = isCameraPreviewOn ? View.VISIBLE : View.GONE;
+        followLineButton.setVisibility(modeButtonVisibility);
+        followBallButton.setVisibility(modeButtonVisibility);
+
+        followLineButton.setText(isLineMode ? "Stop Line" : "Start Line");
+        followBallButton.setText(isBallMode ? "Stop Ball" : "Start Ball");
+
+        followLineButton.setEnabled(!isBallMode);
+        followBallButton.setEnabled(!isLineMode);
+
+        // Joystick only works if no auto-mode is active
+        boolean manualEnabled = !isLineMode && !isBallMode;
+        joystickBase.setAlpha(manualEnabled ? 1.0f : 0.3f);
+        joystickHandle.setAlpha(manualEnabled ? 1.0f : 0.3f);
+        speedSlider.setEnabled(manualEnabled);
     }
 
-    // --- PERMISSIONS ---
-    @Override
-    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == REQUEST_CAMERA_PERMISSION) {
-            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                startCamera();
-            } else {
-                Toast.makeText(this, "Camera permission is required.", Toast.LENGTH_LONG).show();
-            }
-        } else if (requestCode == REQUEST_BT_PERMISSIONS) {
-            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                BT_DeviceListActivity.start(this, REQUEST_ENABLE_BT);
-            } else {
-                Toast.makeText(this, "Bluetooth permissions are required.", Toast.LENGTH_LONG).show();
-            }
-        }
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQUEST_ENABLE_BT && resultCode == RESULT_OK && data != null) {
-            BluetoothDevice device = BT_DeviceListActivity.getDeviceFromIntent(data);
-            if (device != null) connectToDevice(device);
-        }
-    }
-
-    // --- ROBOT LOGIC ---
     public void onClickConnect(View v) {
         if (isConnected) {
             orb.close();
@@ -486,7 +271,8 @@ public class MainActivity extends AppCompatActivity {
 
     @RequiresApi(api = Build.VERSION_CODES.S)
     private void startDeviceListActivity() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED || ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN}, REQUEST_BT_PERMISSIONS);
         } else {
             BT_DeviceListActivity.start(this, REQUEST_ENABLE_BT);
@@ -505,18 +291,34 @@ public class MainActivity extends AppCompatActivity {
             runOnUiThread(() -> {
                 isConnected = success;
                 isConnecting = false;
-                if (!success) Toast.makeText(MainActivity.this, "Connection Failed!", Toast.LENGTH_LONG).show();
                 updateUI();
+                if (!success) Toast.makeText(MainActivity.this, "Connection Failed!", Toast.LENGTH_LONG).show();
             });
         }).start();
     }
 
-    @SuppressLint("DefaultLocale")
-    public void onClickGetBattery(View v) {
-        if (isConnected && orb != null) {
-            Toast.makeText(this, String.format("Battery: %.2fV", orb.getVcc()), Toast.LENGTH_LONG).show();
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_ENABLE_BT && resultCode == RESULT_OK && data != null) {
+            BluetoothDevice device = BT_DeviceListActivity.getDeviceFromIntent(data);
+            if (device != null) connectToDevice(device);
         }
     }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_CAMERA_PERMISSION && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            startCamera();
+        }
+    }
+
+    public void onClickGetBattery(View v) {
+        if (isConnected) Toast.makeText(this, "Battery: " + orb.getVcc() + "V", Toast.LENGTH_SHORT).show();
+    }
+
+    // --- JOYSTICK ---
 
     @SuppressLint("ClickableViewAccessibility")
     private void setupJoystickListener() {
@@ -526,7 +328,7 @@ public class MainActivity extends AppCompatActivity {
             joystickBaseRadius = joystickBase.getWidth() / 2f;
         });
         joystickBase.setOnTouchListener((view, event) -> {
-            if (!isConnected || isLineFollowingActive) return false;
+            if (!isConnected || isLineMode || isBallMode) return false;
 
             switch (event.getAction()) {
                 case MotionEvent.ACTION_DOWN:
@@ -564,9 +366,159 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void stopRobot() {
-        if (orb != null && isConnected) {
+        if (isConnected) {
             orb.setMotor(ORB.M1, ORB.BRAKE_MODE, 0, 0);
             orb.setMotor(ORB.M4, ORB.BRAKE_MODE, 0, 0);
         }
     }
+
+    // ============================================================================================
+    // ANALYZER 1: LINE FOLLOWER (PCA + ROTATION)
+    // ============================================================================================
+    private class LineAnalyzer implements ImageAnalysis.Analyzer {
+        private Bitmap debugBitmap;
+        private Canvas debugCanvas;
+        private Paint pointPaint, linePaint, boxPaint;
+        private float smoothedAngle = 0f;
+        private boolean hasSmoothed = false;
+
+        public LineAnalyzer() {
+            pointPaint = new Paint(); pointPaint.setColor(Color.GREEN); pointPaint.setStrokeWidth(5);
+            linePaint = new Paint(); linePaint.setColor(Color.RED); linePaint.setStrokeWidth(8);
+            boxPaint = new Paint(); boxPaint.setColor(Color.BLUE); boxPaint.setStyle(Paint.Style.STROKE); boxPaint.setStrokeWidth(3);
+        }
+
+        @Override
+        public void analyze(@NonNull ImageProxy image) {
+            if (!isLineMode) { image.close(); return; }
+
+            ByteBuffer buffer = image.getPlanes()[0].getBuffer();
+            byte[] data = new byte[buffer.remaining()];
+            buffer.get(data);
+
+            int srcWidth = image.getWidth();
+            int srcHeight = image.getHeight();
+
+            // Rotate 90 Clockwise for Portrait Mode
+            byte[] rotated = new byte[data.length];
+            rotateY90Clockwise(data, rotated, srcWidth, srcHeight);
+
+            int width = srcHeight;
+            int height = srcWidth;
+
+            if (debugBitmap == null || debugBitmap.getWidth() != width || debugBitmap.getHeight() != height) {
+                debugBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                debugCanvas = new Canvas(debugBitmap);
+            }
+            debugBitmap.eraseColor(Color.TRANSPARENT);
+
+            // ROI: Bottom Half
+            int startRow = 0;
+            int endRow = (int) (height * 0.5f);
+            debugCanvas.drawRect(0, startRow, width, endRow, boxPaint);
+
+            long sumX = 0, sumY = 0;
+            int count = 0;
+            int threshold = 60;
+            int step = 10;
+
+            for (int y = startRow; y < endRow; y += step) {
+                int rowOffset = y * width;
+                for (int x = 0; x < width; x += step) {
+                    int index = rowOffset + x;
+                    if (index >= rotated.length) continue;
+                    if ((rotated[index] & 0xFF) < threshold) {
+                        sumX += x; sumY += y; count++;
+                        debugCanvas.drawPoint(x, y, pointPaint);
+                    }
+                }
+            }
+
+            int steering = 0;
+            if (count > 30) {
+                float meanX = (float) sumX / count;
+                float meanY = (float) sumY / count;
+
+                double covXX = 0, covYY = 0, covXY = 0;
+                for (int y = startRow; y < endRow; y += step) {
+                    int rowOffset = y * width;
+                    for (int x = 0; x < width; x += step) {
+                        int index = rowOffset + x;
+                        if (index >= rotated.length) continue;
+                        if ((rotated[index] & 0xFF) < threshold) {
+                            double dx = x - meanX;
+                            double dy = y - meanY;
+                            covXX += dx * dx; covYY += dy * dy; covXY += dx * dy;
+                        }
+                    }
+                }
+
+                double angleRad = 0.5 * Math.atan2(2.0 * covXY, covXX - covYY);
+                double desiredHeading = -Math.PI / 2.0;
+                double errorAngle = angleRad - desiredHeading;
+
+                // Normalize angle [-PI, PI]
+                while (errorAngle > Math.PI) errorAngle -= 2 * Math.PI;
+                while (errorAngle < -Math.PI) errorAngle += 2 * Math.PI;
+
+                // Smoothing
+                float angleDeg = (float) Math.toDegrees(angleRad);
+                if (!hasSmoothed) { smoothedAngle = angleDeg; hasSmoothed = true; }
+                else { smoothedAngle = smoothedAngle * 0.8f + angleDeg * 0.2f; }
+
+                // Visualization Line
+                float smoothedRad = (float) Math.toRadians(smoothedAngle);
+                float len = Math.min(width, height) * 0.9f;
+                float endX = meanX + len * (float) Math.cos(smoothedRad);
+                float endY = meanY + len * (float) Math.sin(smoothedRad);
+                debugCanvas.drawLine(meanX, meanY, endX, endY, linePaint);
+
+                // Control
+                float KP_POS = 0.63f;
+                float KP_ANG = 0.11f;
+                float errorPos = meanX - (width / 2.0f);
+                float errorAngleDeg = (float) Math.toDegrees(errorAngle);
+
+                steering = Math.round(KP_POS * errorPos + KP_ANG * errorAngleDeg);
+                steering = Math.max(-800, Math.min(800, steering));
+            }
+
+            runOnUiThread(() -> {
+                imageView.setImageBitmap(debugBitmap);
+                imageView.setRotation(0);
+            });
+
+            if (isConnected) {
+                if (count > 30) {
+                    // Auto speed movement
+                    driveRobot(AUTO_SPEED - steering, AUTO_SPEED + steering);
+                } else {
+                    stopRobot();
+                }
+            }
+            image.close();
+        }
+
+        private void rotateY90Clockwise(byte[] src, byte[] dst, int srcWidth, int srcHeight) {
+            int dstWidth = srcHeight;
+            for (int y = 0; y < srcHeight; y++) {
+                int rowOffset = y * srcWidth;
+                for (int x = 0; x < srcWidth; x++) {
+                    dst[x * dstWidth + (dstWidth - 1 - y)] = src[rowOffset + x];
+                }
+            }
+        }
+
+        // Helper for autonomous driving
+        private void driveRobot(int left, int right) {
+            if (!isConnected) return;
+            left = Math.max(-1000, Math.min(1000, left));
+            right = Math.max(-1000, Math.min(1000, right));
+            orb.setMotor(ORB.M1, ORB.SPEED_MODE, -left, 0);
+            orb.setMotor(ORB.M4, ORB.SPEED_MODE, right, 0);
+        }
+    }
+
+
+
 }
