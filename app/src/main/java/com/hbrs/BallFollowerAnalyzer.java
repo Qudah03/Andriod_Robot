@@ -23,18 +23,20 @@ public class BallFollowerAnalyzer implements ImageAnalysis.Analyzer {
     private final Paint redPaint;
     private final Paint targetPaint;
 
-    // Reuse this array to avoid garbage collection lag
     private final float[] hsvCache = new float[3];
 
     // --- HSV TUNING PARAMETERS ---
-    // Red wraps around 0 (e.g., 0-25 and 335-360)
-    private static final float RED_HUE_LOW_LIMIT = 25f;  // Lower band end
-    private static final float RED_HUE_HIGH_LIMIT = 335f; // Upper band start
-    private static final float MIN_SATURATION = 0.5f;     // Must be vibrant (0.0 - 1.0)
-    private static final float MIN_VALUE = 0.4f;          // Must not be too dark (0.0 - 1.0)
+    private static final float RED_HUE_LOW_LIMIT = 20f;
+    private static final float RED_HUE_HIGH_LIMIT = 340f;
+    private static final float MIN_SATURATION = 0.65f;
+    private static final float MIN_VALUE = 0.3f;
 
     private static final int MIN_BLOB_SIZE = 25;
     private static final float TARGET_RADIUS = 150f;
+
+    // --- SMOOTHING VARIABLES ---
+    private float smoothedCenterX = -1;
+    private float smoothedRadius = -1;
 
     public BallFollowerAnalyzer(ORB orb, ImageView imageView, boolean isConnected, Runnable stopRobotAction) {
         this.orb = orb;
@@ -55,20 +57,18 @@ public class BallFollowerAnalyzer implements ImageAnalysis.Analyzer {
 
     @Override
     public void analyze(@NonNull ImageProxy image) {
-        // We need all three planes (Y, U, V) to convert to RGB/HSV
         ByteBuffer yBuffer = image.getPlanes()[0].getBuffer();
         ByteBuffer uBuffer = image.getPlanes()[1].getBuffer();
         ByteBuffer vBuffer = image.getPlanes()[2].getBuffer();
 
-        int srcWidth = image.getWidth();
-        int srcHeight = image.getHeight();
+        // Native Dimensions (Landscape)
+        int width = image.getWidth();
+        int height = image.getHeight();
 
         int uvRowStride = image.getPlanes()[1].getRowStride();
         int uvPixelStride = image.getPlanes()[1].getPixelStride();
 
-        int width = srcHeight;
-        int height = srcWidth;
-
+        // 1. Setup Bitmap (Use native Width/Height)
         if (debugBitmap == null || debugBitmap.getWidth() != width || debugBitmap.getHeight() != height) {
             debugBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
             debugCanvas = new Canvas(debugBitmap);
@@ -82,103 +82,109 @@ public class BallFollowerAnalyzer implements ImageAnalysis.Analyzer {
         int minX = width, maxX = 0;
         int minY = height, maxY = 0;
 
-        // Step 4 is a good balance between speed and detection distance
-        int step = 4;
+        int step = 6;
 
-        for (int y = 0; y < srcHeight; y += step) {
-            for (int x = 0; x < srcWidth; x += step) {
+        for (int y = 0; y < height; y += step) {
+            for (int x = 0; x < width; x += step) {
 
-                // 1. Get YUV indices
-                int yIndex = y * srcWidth + x;
+                int yIndex = y * width + x;
                 int uvIndex = (y / 2) * uvRowStride + (x / 2) * uvPixelStride;
 
-                // Safety check for buffer bounds
-                if (yIndex >= yBuffer.remaining() || uvIndex >= uBuffer.remaining()) continue;
+                if (yIndex >= yBuffer.capacity() || uvIndex >= uBuffer.capacity()) continue;
 
-                // 2. Extract Raw YUV
                 int Y = yBuffer.get(yIndex) & 0xFF;
                 int U = uBuffer.get(uvIndex) & 0xFF;
                 int V = vBuffer.get(uvIndex) & 0xFF;
 
-                // 3. Convert YUV -> RGB
-                // Standard integer conversion formula (faster than float)
+                // RGB Conversion
                 int r = (int) (Y + 1.370705f * (V - 128));
                 int g = (int) (Y - 0.698001f * (V - 128) - 0.337633f * (U - 128));
                 int b = (int) (Y + 1.732446f * (U - 128));
 
-                // Clamp to 0-255
                 r = Math.max(0, Math.min(255, r));
                 g = Math.max(0, Math.min(255, g));
                 b = Math.max(0, Math.min(255, b));
 
-                // 4. Convert RGB -> HSV
+                // HSV Conversion
                 Color.RGBToHSV(r, g, b, hsvCache);
-                float hue = hsvCache[0];        // 0 .. 360
-                float saturation = hsvCache[1]; // 0 .. 1
-                float value = hsvCache[2];      // 0 .. 1
+                float hue = hsvCache[0];
+                float saturation = hsvCache[1];
+                float value = hsvCache[2];
 
-                // 5. Check "Redness" in HSV
-                // Red is tricky: it exists at the start (0-25) AND end (335-360) of the circle.
                 boolean isRedHue = (hue < RED_HUE_LOW_LIMIT || hue > RED_HUE_HIGH_LIMIT);
                 boolean isSaturated = saturation > MIN_SATURATION;
                 boolean isBright = value > MIN_VALUE;
 
                 if (isRedHue && isSaturated && isBright) {
 
-                    // Coordinate Rotation & Inversion Fix
-                    int rotX = width - 1 - y;
-                    int rotY = width - 1 - x;
-
-                    sumX += rotX;
-                    sumY += rotY;
+                    // --- NO ROTATION NEEDED (Landscape) ---
+                    // Direct mapping: x is x, y is y
+                    sumX += x;
+                    sumY += y;
                     pixelCount++;
 
-                    if (rotX < minX) minX = rotX;
-                    if (rotX > maxX) maxX = rotX;
-                    if (rotY < minY) minY = rotY;
-                    if (rotY > maxY) maxY = rotY;
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
 
-                    debugCanvas.drawPoint(rotX, rotY, redPaint);
+                    debugCanvas.drawPoint(x, y, redPaint);
                 }
             }
         }
 
         boolean ballDetected = false;
-        float ballRadius = 0;
-        float centerX = 0;
 
         if (pixelCount > MIN_BLOB_SIZE) {
-            centerX = (float) sumX / pixelCount;
-            float centerY = (float) sumY / pixelCount;
-
+            float rawCenterX = (float) sumX / pixelCount;
+            // Radius calculation
             float widthBox = maxX - minX;
             float heightBox = maxY - minY;
-            ballRadius = (widthBox + heightBox) / 4.0f;
+            float rawRadius = (widthBox + heightBox) / 4.0f;
 
-            debugCanvas.drawCircle(centerX, centerY, ballRadius, targetPaint);
-            debugCanvas.drawLine(centerX - 10, centerY, centerX + 10, centerY, targetPaint);
-            debugCanvas.drawLine(centerX, centerY - 10, centerX, centerY + 10, targetPaint);
+            // Smoothing Logic
+            if (smoothedCenterX == -1) {
+                smoothedCenterX = rawCenterX;
+                smoothedRadius = rawRadius;
+            } else {
+                smoothedCenterX = smoothedCenterX * 0.7f + rawCenterX * 0.3f;
+                smoothedRadius = smoothedRadius * 0.7f + rawRadius * 0.3f;
+            }
+
+            // Draw circle at exact center
+            debugCanvas.drawCircle(smoothedCenterX, height / 2f, smoothedRadius, targetPaint);
+            debugCanvas.drawCircle(smoothedCenterX, height / 2f, 5, targetPaint);
 
             ballDetected = true;
+        } else {
+            smoothedCenterX = -1;
         }
 
-        // --- MOTOR CONTROL LOGIC (Preserved from your working version) ---
         if (isConnected) {
             if (ballDetected) {
-                // 1. Steering
-                float errorX = centerX - (width / 2.0f);
-                int steering = (int) (errorX * -1.2f); // Negative gain for correction
+                // Center of screen is width/2
+                float errorX = smoothedCenterX - (width / 2.0f);
 
-                // 2. Distance
-                float radiusError = TARGET_RADIUS - ballRadius;
+                // --- STEERING ---
+                // If X is small (Left), Error is negative.
+                // If X is large (Right), Error is positive.
+                // Depending on motor wiring, you might need negative or positive gain.
+                // Standard: Turn TOWARD error.
+                int steering = (int) (errorX * 0.8f);
+
+                // Distance Control
+                float radiusError = TARGET_RADIUS - smoothedRadius;
                 int forwardSpeed = (int) (radiusError * 8.0f);
 
                 forwardSpeed = Math.max(-600, Math.min(800, forwardSpeed));
+                if (Math.abs(radiusError) < 20) forwardSpeed = 0;
 
-                if (Math.abs(radiusError) < 15) forwardSpeed = 0;
-
-                int leftSpeed = forwardSpeed - steering;
-                int rightSpeed = forwardSpeed + steering;
+                // Motor Mixing
+                // Note: You might need to swap + and - here depending on if your phone
+                // is mounted "Camera Left" or "Camera Right".
+                // Try this first:
+                int leftSpeed = forwardSpeed + steering;
+                int rightSpeed = forwardSpeed - steering;
 
                 leftSpeed = Math.max(-1000, Math.min(1000, leftSpeed));
                 rightSpeed = Math.max(-1000, Math.min(1000, rightSpeed));
@@ -186,16 +192,16 @@ public class BallFollowerAnalyzer implements ImageAnalysis.Analyzer {
                 orb.setMotor(ORB.M1, ORB.SPEED_MODE, -leftSpeed, 0);
                 orb.setMotor(ORB.M4, ORB.SPEED_MODE, rightSpeed, 0);
             } else {
-                // Search pattern
-                int searchSpeed = 150;
-                orb.setMotor(ORB.M1, ORB.SPEED_MODE, -searchSpeed, 0);
-                orb.setMotor(ORB.M4, ORB.SPEED_MODE, searchSpeed, 0);
+                stopRobotAction.run();
             }
         }
 
         imageView.post(() -> {
             imageView.setImageBitmap(debugBitmap);
+            // No rotation needed for ImageView either
             imageView.setRotation(0);
+            // Make sure the image fills the width
+            imageView.setScaleType(ImageView.ScaleType.FIT_XY);
         });
 
         image.close();

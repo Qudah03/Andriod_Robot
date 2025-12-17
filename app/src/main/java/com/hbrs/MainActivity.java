@@ -82,9 +82,15 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // Forces Portrait mode so Bluetooth doesn't disconnect
+        setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
         setContentView(R.layout.activity_main);
 
         cameraExecutor = Executors.newSingleThreadExecutor();
+
+        // keep the screen awake so the phone doesn't sleep while on the robot.
+        getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        // getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
 
         // Initialize all UI elements
         connectButton = findViewById(R.id.btn_connect);
@@ -209,10 +215,18 @@ public class MainActivity extends AppCompatActivity {
         if (cameraProvider == null) return;
         cameraProvider.unbindAll();
 
-        Preview preview = new Preview.Builder().build();
+        // 1. Preview
+        Preview preview = new Preview.Builder()
+                // OPTIONAL: Force preview to rotate if it looks sideways on screen
+                // .setTargetRotation(android.view.Surface.ROTATION_90)
+                .build();
         preview.setSurfaceProvider(previewView.getSurfaceProvider());
 
+        // 2. Image Analysis
         imageAnalysis = new ImageAnalysis.Builder()
+                // FORCE LANDSCAPE ROTATION HERE
+                // This makes the buffer Wide (Width > Height) for your Analyzer
+                .setTargetRotation(android.view.Surface.ROTATION_90)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build();
 
@@ -222,6 +236,7 @@ public class MainActivity extends AppCompatActivity {
 
         cameraProvider.bindToLifecycle(this, cameraSelector, imageAnalysis, preview);
     }
+
 
     // --- UI & BLUETOOTH ---
 
@@ -372,5 +387,19 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-
+    // Ensure everything shuts down cleanly.
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        // 1. Stop the robot immediately
+        if (orb != null) {
+            orb.setMotor(ORB.M1, ORB.BRAKE_MODE, 0, 0);
+            orb.setMotor(ORB.M4, ORB.BRAKE_MODE, 0, 0);
+            orb.close();
+        }
+        // 2. Shut down the background thread
+        if (cameraExecutor != null) {
+            cameraExecutor.shutdown();
+        }
+    }
 }
