@@ -9,7 +9,7 @@ This Android application serves as a central control hub for an educational mobi
 - **Speed Control:** Adjustable speed slider to limit maximum motor output.
 - **Differential Drive:** Real-time mixing of X/Y joystick inputs into Left/Right motor signals.
 
-### 2. Autonomous Line Following 
+### 2. Autonomous Line Following
 - **Computer Vision:** Uses the phone's camera to detect dark lines on light surfaces.
 - **Algorithm:** Implements a Weighted Average (Centroid) algorithm combined with PCA (Principal Component Analysis) for heading calculation.
 - **PID Control:** Smooth steering adjustments to keep the robot centered on the path.
@@ -83,7 +83,7 @@ The app requires the following permissions (requested at runtime):
 
 ## 📄 License
 
-[Add your license here, e.g., MIT License]
+[Abdallah AlQudah]
 
 ---
-*Developed for the HBRS Mobile Robots Course.*
+*Developed for the HBRS Android Robotic Course.*
